@@ -1,8 +1,9 @@
 """
 =============================================================================
-📱 UDISE+ CLOUD DASHBOARD & CRAWLER MANAGER
+📱 UDISE+ 24/7 AUTONOMOUS CLOUD CRAWLER & MANAGER (RENDER ENGINE)
 =============================================================================
 Features:
+- 24/7 Self-Ping Keep-Alive Daemon (Prevents Sleep on Render Free Tier)
 - Start / Stop Cloud Crawler on Demand
 - Live Real-Time Extraction Statistics
 - Built-in Files Browser (View any school JSON live in UI)
@@ -18,6 +19,7 @@ import json
 import io
 import zipfile
 import threading
+import requests
 from flask import Flask, render_template, jsonify, send_file, request, Response
 
 app = Flask(__name__)
@@ -25,9 +27,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JSON_DIR = os.path.join(BASE_DIR, "json_schools")
 CHECKPOINT_FILE = os.path.join(BASE_DIR, "crawler_checkpoint.json")
 LOG_FILE = os.path.join(BASE_DIR, "crawler_activity.log")
-CLUSTERS_CSV = os.path.join(BASE_DIR, "all_india_village_ward_school_counts.csv")
+CLUSTERS_CSV = os.path.join(BASE_DIR, "udise_clusters.csv")
 if not os.path.exists(CLUSTERS_CSV):
-    CLUSTERS_CSV = os.path.join(BASE_DIR, "udise_clusters.csv")
+    CLUSTERS_CSV = os.path.join(BASE_DIR, "all_india_village_ward_school_counts.csv")
 
 os.makedirs(JSON_DIR, exist_ok=True)
 
@@ -52,8 +54,26 @@ try:
     crawler_thread = threading.Thread(target=run_crawler_process, daemon=True)
     crawler_thread.start()
     is_crawler_running = True
+    print("🚀 Cloud Crawler background thread launched successfully!")
 except Exception as e:
     print(f"Auto-start exception: {e}")
+
+# =============================================================================
+# 💓 24/7 KEEP-ALIVE DAEMON (PINGS ITSELF EVERY 3 MINUTES SO IT NEVER SLEEPS)
+# =============================================================================
+def keep_alive_worker():
+    time.sleep(30)
+    my_url = os.environ.get("RENDER_EXTERNAL_URL", "https://udise-cloud-crawler.onrender.com")
+    while True:
+        try:
+            time.sleep(180) # Every 3 minutes
+            res = requests.get(f"{my_url}/api/stats", timeout=15)
+            if res.status_code == 200:
+                print("💓 [Keep-Alive] Ping OK! Render cloud container staying 24/7 awake.")
+        except Exception as e:
+            print(f"Keep-Alive ping notice: {e}")
+
+threading.Thread(target=keep_alive_worker, daemon=True).start()
 
 @app.route("/")
 def index():
@@ -72,7 +92,7 @@ def get_stats():
         except Exception:
             pass
             
-    total_clusters = ckpt_data.get("total_clusters", 579454)
+    total_clusters = ckpt_data.get("total_clusters", 581128)
     workers = ckpt_data.get("workers", {})
     
     completed_clusters = 0
@@ -127,7 +147,7 @@ def stop_crawler():
 def list_files():
     """Returns list of recent extracted school files for UI file browser"""
     if not os.path.exists(JSON_DIR):
-        return jsonify([])
+        return jsonify({"total_files": 0, "recent_files": []})
         
     all_files = [f for f in os.listdir(JSON_DIR) if f.endswith(".json")]
     all_files.sort(key=lambda f: os.path.getmtime(os.path.join(JSON_DIR, f)), reverse=True)
@@ -155,7 +175,6 @@ def list_files():
 
 @app.route("/api/file/<filename>")
 def view_single_file(filename):
-    """View full JSON content of any school file"""
     safe_name = os.path.basename(filename)
     fpath = os.path.join(JSON_DIR, safe_name)
     if os.path.exists(fpath):
@@ -173,12 +192,13 @@ def download_single_json(filename):
 
 @app.route("/download/all-json-zip")
 def download_all_zip():
-    """Streams all extracted JSON files as a single ZIP archive"""
     if not os.path.exists(JSON_DIR):
         return "No files found", 404
         
     files = [f for f in os.listdir(JSON_DIR) if f.endswith(".json")]
-    
+    if not files:
+        return "No files extracted yet", 404
+        
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
         for fname in files:
