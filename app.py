@@ -1,60 +1,59 @@
 """
 =============================================================================
-📱 MOBILE-FRIENDLY WEB DASHBOARD & DATA EXPORTER FOR GCP CRAWLER
+📱 UDISE+ CLOUD DASHBOARD & CRAWLER MANAGER
+=============================================================================
+Features:
+- Start / Stop Cloud Crawler on Demand
+- Live Real-Time Extraction Statistics
+- Built-in Files Browser (View any school JSON live in UI)
+- 1-Click "Download All JSONs (ZIP Archive)"
+- Single School JSON Downloader
 =============================================================================
 """
 
 import os
+import sys
+import time
 import json
-import csv
 import io
 import zipfile
-from flask import Flask, render_template, jsonify, send_file, request
+import threading
+from flask import Flask, render_template, jsonify, send_file, request, Response
 
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JSON_DIR = os.path.join(BASE_DIR, "json_schools")
 CHECKPOINT_FILE = os.path.join(BASE_DIR, "crawler_checkpoint.json")
 LOG_FILE = os.path.join(BASE_DIR, "crawler_activity.log")
+CLUSTERS_CSV = os.path.join(BASE_DIR, "all_india_village_ward_school_counts.csv")
+if not os.path.exists(CLUSTERS_CSV):
+    CLUSTERS_CSV = os.path.join(BASE_DIR, "udise_clusters.csv")
 
-CSV_HEADERS = [
-    "udise_code", "school_name", "school_id", "status", "year_desc",
-    "state_name", "district_name", "block_name", "cluster_name", "village_ward",
-    "panchayat_name", "panchayat_id",
-    "pincode", "address", "latitude", "longitude", "assembly_constituency", "urban_local_body",
-    "school_category", "category_desc", "management_type", "management_desc_state",
-    "class_from", "class_to", "school_type", "rural_urban", "pm_shri",
-    "headmaster_principal_name", "respondent_name", "phone", "email", "website",
-    "board_secondary_10th", "board_higher_secondary_12th", "established_year",
-    "recog_year_pri", "recog_year_sec", "recog_year_hsec", "medium_of_instruction_1",
-    "annual_instructional_days", "residential_school", "minority_school", "pre_primary_section",
-    "total_students", "total_boys", "total_girls",
-    "total_teachers", "regular_teachers", "contract_teachers",
-    "male_teachers", "female_teachers", "teachers_post_graduate_above",
-    "teachers_graduate", "teachers_above_55_age", "teachers_in_service_trained",
-    "teachers_non_teaching_assign",
-    "building_status", "total_building_blocks", "classrooms_total", "other_rooms",
-    "classrooms_good_condition", "classrooms_minor_repair", "classrooms_major_repair",
-    "boundary_wall_type", "students_with_furniture",
-    "drinking_water", "electricity", "solar_panel", "rainwater_harvesting",
-    "medical_checkup", "ramps_accessible", "handrails", "library", "playground",
-    "integrated_science_lab", "tinkering_lab_atl", "ict_lab", "dth_tv_access",
-    "desktop_computers_working", "laptops_working", "tablets_working",
-    "projectors_working", "printers_total", "digital_boards_working", "internet_available",
-    "boys_toilets_functional", "girls_toilets_functional",
-    "boys_urinals", "girls_urinals", "cwsn_special_toilets_boys", "cwsn_special_toilets_girls",
-    "handwash_available", "meal_handwash_available"
-]
+os.makedirs(JSON_DIR, exist_ok=True)
 
-def is_private_management(mgmt_str, mgmt_id):
-    if not mgmt_str:
-        mgmt_str = ""
-    mgmt_lower = mgmt_str.lower()
-    if any(k in mgmt_lower for k in ["private", "unaided", "aided", "unrecognized", "madarsa", "trust", "society"]):
-        return True
-    if mgmt_id in [4, 5, 8, 9, 10, 11, 12, 13, 14, 15]:
-        return True
-    return False
+# Crawler Lifecycle State
+crawler_thread = None
+is_crawler_running = False
+crawler_stop_signal = threading.Event()
+
+def run_crawler_process():
+    global is_crawler_running
+    try:
+        from cluster_crawler import run_distributed_crawler
+        is_crawler_running = True
+        run_distributed_crawler()
+    except Exception as e:
+        print(f"Crawler error: {e}")
+    finally:
+        is_crawler_running = False
+
+# Auto-start on cloud boot
+try:
+    crawler_thread = threading.Thread(target=run_crawler_process, daemon=True)
+    crawler_thread.start()
+    is_crawler_running = True
+except Exception as e:
+    print(f"Auto-start exception: {e}")
 
 @app.route("/")
 def index():
@@ -62,7 +61,8 @@ def index():
 
 @app.route("/api/stats")
 def get_stats():
-    total_json_files = len(os.listdir(JSON_DIR)) if os.path.exists(JSON_DIR) else 0
+    json_files = os.listdir(JSON_DIR) if os.path.exists(JSON_DIR) else []
+    total_json_files = len([f for f in json_files if f.endswith(".json")])
     
     ckpt_data = {}
     if os.path.exists(CHECKPOINT_FILE):
@@ -72,7 +72,7 @@ def get_stats():
         except Exception:
             pass
             
-    total_clusters = ckpt_data.get("total_clusters", 581128)
+    total_clusters = ckpt_data.get("total_clusters", 579454)
     workers = ckpt_data.get("workers", {})
     
     completed_clusters = 0
@@ -84,124 +84,115 @@ def get_stats():
             
     progress_pct = (completed_clusters / total_clusters * 100) if total_clusters else 0
     
-    # Recent logs
     logs = []
     if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, "r", encoding="utf-8") as f:
-                logs = [line.strip() for line in f.readlines()[-10:]]
+                logs = [line.strip() for line in f.readlines()[-12:]]
         except Exception:
             pass
             
     return jsonify({
+        "status": "running" if is_crawler_running else "stopped",
         "total_schools_saved": total_json_files,
         "completed_clusters": completed_clusters,
         "total_clusters": total_clusters,
         "progress_pct": round(progress_pct, 2),
-        "active_workers": active_workers,
-        "total_workers": len(workers) or 30,
-        "timestamp": ckpt_data.get("timestamp", ""),
+        "active_workers": active_workers if is_crawler_running else 0,
+        "total_workers": len(workers) or 100,
+        "timestamp": ckpt_data.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S")),
         "recent_logs": logs
     })
 
-@app.route("/export/csv/<category>")
-def export_csv(category):
-    """Generates on-the-fly streaming CSV download for mobile"""
-    if not os.path.exists(JSON_DIR):
-        return "No data found", 404
+@app.route("/api/crawler/start", methods=["POST"])
+def start_crawler():
+    global crawler_thread, is_crawler_running
+    if is_crawler_running:
+        return jsonify({"success": True, "message": "Crawler is already running!"})
         
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(CSV_HEADERS)
+    crawler_stop_signal.clear()
+    crawler_thread = threading.Thread(target=run_crawler_process, daemon=True)
+    crawler_thread.start()
+    is_crawler_running = True
+    return jsonify({"success": True, "message": "Crawler started successfully!"})
+
+@app.route("/api/crawler/stop", methods=["POST"])
+def stop_crawler():
+    global is_crawler_running
+    is_crawler_running = False
+    crawler_stop_signal.set()
+    return jsonify({"success": True, "message": "Crawler stopped!"})
+
+@app.route("/api/files")
+def list_files():
+    """Returns list of recent extracted school files for UI file browser"""
+    if not os.path.exists(JSON_DIR):
+        return jsonify([])
+        
+    all_files = [f for f in os.listdir(JSON_DIR) if f.endswith(".json")]
+    all_files.sort(key=lambda f: os.path.getmtime(os.path.join(JSON_DIR, f)), reverse=True)
     
-    count = 0
-    files = os.listdir(JSON_DIR)
-    
-    for fname in files:
-        if not fname.endswith(".json"):
-            continue
+    recent = all_files[:50]
+    file_list = []
+    for fname in recent:
+        fpath = os.path.join(JSON_DIR, fname)
         try:
-            with open(os.path.join(JSON_DIR, fname), "r", encoding="utf-8") as f:
-                d = json.load(f)
-                
-            d1 = d.get("basic_info", {})
-            d2 = d.get("profile", {})
-            d3 = d.get("facilities", {})
-            d4 = d.get("enrolment_and_teachers", {})
-            d5 = d.get("report_card", {})
-            
-            mgmt_str = f"{d1.get('schCategoryType', '')} {d1.get('schMgmtType', '')} {d1.get('schMgmtDesc', '')} {d1.get('schMgmtDescSt', '')}"
-            mgmt_id = d1.get("schMgmtId")
-            is_pvt = is_private_management(mgmt_str, mgmt_id)
-            
-            if category == "private" and not is_pvt:
-                continue
-            if category == "govt" and is_pvt:
-                continue
-                
-            code = d.get("udise_code", "")
-            row = [
-                d1.get("udiseschCode") or code, d1.get("schoolName", ""), d1.get("schoolId", ""),
-                d1.get("schoolStatusName", ""), d1.get("yearDesc", ""), d1.get("stateName", ""),
-                d1.get("districtName", ""), d1.get("blockName", ""), d1.get("clusterName", ""),
-                d1.get("villageName") or d1.get("lgdwardName", ""),
-                d1.get("lgdvillpanchayatName") or d5.get("panDesc") or "",
-                d1.get("lgdpanchayatId") or "",
-                d1.get("pincode", ""), d1.get("address", ""), d1.get("latitude", ""), d1.get("longitude", ""),
-                d5.get("assemblyCdDesc", ""), d1.get("lgdurbanlocalbodyName", ""),
-                d1.get("schCategoryType", ""), d1.get("schCatDesc", ""), d1.get("schMgmtType", ""),
-                d1.get("schMgmtDescSt", ""), d1.get("classFrm", ""), d1.get("classTo", ""),
-                d1.get("schTypeDesc", ""), d1.get("schLocDesc", ""), d1.get("pmShriYn", ""),
-                d2.get("headMasterName", ""), d2.get("respName", ""), d2.get("schPhone", ""),
-                (d2.get("email") or "").replace("[at]", "@").replace("[dot]", "."),
-                d2.get("website", ""), d2.get("boardSecName", ""), d2.get("boardHighSecName", ""),
-                d2.get("estdYear", ""), d2.get("recogYearPri", ""), d2.get("recogYearSec", ""),
-                d2.get("recogYearHsec", ""), d2.get("mediumOfInstrName1", ""), d2.get("instructionalDays", ""),
-                d2.get("resiSchDesc", ""), d2.get("minorityYnDesc", ""), d2.get("ppSecDesc", ""),
-                d4.get("totalCount", ""), d4.get("totalBoy", ""), d4.get("totalGirl", ""),
-                (d4.get("totalTeacherReg", 0) or 0) + (d4.get("totalTeacherCon", 0) or 0),
-                d4.get("totalTeacherReg", ""), d4.get("totalTeacherCon", ""),
-                d4.get("totalTeacherMale", ""), d4.get("totalTeacherFemale", ""),
-                d5.get("totTchPgraduateAbove", ""), d5.get("totTchGraduateAbove", ""),
-                d5.get("tchAbove55", ""), d5.get("tchRecvdServiceTrng", ""), d5.get("tchInvlovedNonTchAssign", ""),
-                d3.get("bldStatus", ""), d3.get("bldBlkTot") or d3.get("bldBlk", ""),
-                d3.get("clsrmsInst", ""), d3.get("othrooms", ""), d3.get("clsrmsGd", ""),
-                d3.get("clsrmsMin", ""), d3.get("clsrmsMaj", ""), d3.get("bndrywallType", ""),
-                d3.get("stusHvFurnt", ""), d3.get("drinkWaterYnDesc", ""), d3.get("electricityYnDesc", ""),
-                d3.get("solarpanelYnDesc", ""), d3.get("rainHarvestYnDesc", ""), d3.get("medchkYnDesc", ""),
-                d3.get("rampsYnDesc", ""), d3.get("handrailsYnDesc", ""), d3.get("libraryYnDesc", ""),
-                d3.get("playgroundYnDesc", ""),
-                "1-Yes" if d3.get("integratedLabYn") == 1 else "2-No",
-                "1-Yes" if d3.get("tinkeringLabYn") == 1 else "2-No",
-                d3.get("ictLabYnDesc", ""), d3.get("accessDthYnDesc", ""),
-                d3.get("desktopFun", ""), d3.get("laptopFun", ""), d3.get("tabletsFun", ""),
-                d3.get("projectorFun", ""), d3.get("printerTot", ""), d3.get("digiBoardFun", ""),
-                d3.get("internetYnDesc", ""), d3.get("toiletbFun", ""), d3.get("toiletgFun", ""),
-                d3.get("urinalsb", ""), d3.get("urinalsg", ""), d3.get("toiletbCwsnFun", ""),
-                d3.get("toiletgCwsnFun", ""), d3.get("handwashYnDesc", ""), d3.get("handwashMealYnDesc", "")
-            ]
-            writer.writerow(row)
-            count += 1
+            sz = os.path.getsize(fpath)
+            code = fname.replace("school_", "").replace(".json", "")
+            file_list.append({
+                "filename": fname,
+                "udise_code": code,
+                "size_kb": round(sz / 1024, 1),
+                "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(fpath)))
+            })
         except Exception:
             continue
             
-    output.seek(0)
-    filename = f"udise_{category}_schools_{count}_records.csv"
+    return jsonify({
+        "total_files": len(all_files),
+        "recent_files": file_list
+    })
+
+@app.route("/api/file/<filename>")
+def view_single_file(filename):
+    """View full JSON content of any school file"""
+    safe_name = os.path.basename(filename)
+    fpath = os.path.join(JSON_DIR, safe_name)
+    if os.path.exists(fpath):
+        with open(fpath, "r", encoding="utf-8") as f:
+            return jsonify(json.load(f))
+    return jsonify({"error": "File not found"}), 404
+
+@app.route("/download/json/<filename>")
+def download_single_json(filename):
+    safe_name = os.path.basename(filename)
+    fpath = os.path.join(JSON_DIR, safe_name)
+    if os.path.exists(fpath):
+        return send_file(fpath, as_attachment=True, download_name=safe_name)
+    return "File not found", 404
+
+@app.route("/download/all-json-zip")
+def download_all_zip():
+    """Streams all extracted JSON files as a single ZIP archive"""
+    if not os.path.exists(JSON_DIR):
+        return "No files found", 404
+        
+    files = [f for f in os.listdir(JSON_DIR) if f.endswith(".json")]
+    
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for fname in files:
+            fpath = os.path.join(JSON_DIR, fname)
+            zf.write(fpath, arcname=fname)
+            
+    memory_file.seek(0)
+    zip_name = f"udise_all_schools_{len(files)}_json_files.zip"
     return send_file(
-        io.BytesIO(output.getvalue().encode('utf-8-sig')),
-        mimetype="text/csv",
+        memory_file,
+        mimetype="application/zip",
         as_attachment=True,
-        download_name=filename
+        download_name=zip_name
     )
-
-import threading
-from cluster_crawler import run_distributed_crawler
-
-try:
-    threading.Thread(target=run_distributed_crawler, daemon=True).start()
-    print("🚀 Cloud Background Crawler thread started successfully!")
-except Exception as e:
-    print(f"⚠️ Crawler startup error: {e}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
