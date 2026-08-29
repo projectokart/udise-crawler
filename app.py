@@ -194,5 +194,15 @@ def export_csv(category):
         download_name=filename
     )
 
+import threading
+from cluster_crawler import run_distributed_crawler
+
+try:
+    threading.Thread(target=run_distributed_crawler, daemon=True).start()
+    print("🚀 Cloud Background Crawler thread started successfully!")
+except Exception as e:
+    print(f"⚠️ Crawler startup error: {e}")
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
